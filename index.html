@@ -160,12 +160,13 @@
         <button class="btn gold" id="btnImgCover">🖼 保存封面图</button>
         <button class="btn gold" id="btnImgInside">🖼 保存内页图</button>
         <button class="btn primary" id="btnVideo">🎬 录制视频</button>
+        <button class="btn ghost" id="btnMusic">🎵 音乐</button>
       </div>
       <div class="video-box" id="videoBox" hidden>
         <video id="videoPreview" controls playsinline muted></video>
         <p class="video-tip">已自动下载 · 手机上若未自动保存，长按视频选择「存储视频」</p>
       </div>
-      <p class="hint">视频含信封拆信开场 + 翻卡动画，总长约 10 秒，并配上圣诞背景音乐；图片为高清 PNG。</p>
+      <p class="hint">视频含信封拆信开场 + 翻卡动画，总长约 10 秒，并配上圣诞背景音乐；图片为高清 PNG。<br>手机上若没听到音乐，点一下「🎵 音乐」手动开启。</p>
     </section>
   </div>
 </div>
@@ -808,18 +809,35 @@ function updateButtons(){
  * 音频模块
  * ============================================================ */
 let audioCtx=null, audioBuffer=null, audioSource=null, mediaDest=null, musicGain=null;
-async function ensureAudio(){
-  if(audioCtx)return;
+let decodePromise=null, pendingMusic=false;
+
+/* 必须在用户手势里同步执行：创建并 resume AudioContext，
+   iOS/Safari 只认同步调用，任何 await 之后再 resume 都会被拦下。 */
+function primeAudio(){
   const AC=window.AudioContext||window.webkitAudioContext;
-  if(!AC||!AUDIO_B64||AUDIO_B64.startsWith('__'))return;
-  audioCtx=new AC();
-  const bin=atob(AUDIO_B64);
-  const bytes=new Uint8Array(bin.length);
-  for(let i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);
-  audioBuffer=await audioCtx.decodeAudioData(bytes.buffer);
+  if(!AC||!AUDIO_B64||AUDIO_B64.startsWith('__'))return null;
+  if(!audioCtx)audioCtx=new AC();
+  if(audioCtx.state==='suspended'){try{audioCtx.resume();}catch(e){}}
+  return audioCtx;
+}
+async function ensureAudio(){
+  const ctx=primeAudio();
+  if(!ctx)return;
+  if(audioBuffer)return;
+  if(decodePromise)return decodePromise;
+  decodePromise=(async()=>{
+    try{
+      const bin=atob(AUDIO_B64);
+      const bytes=new Uint8Array(bin.length);
+      for(let i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);
+      audioBuffer=await ctx.decodeAudioData(bytes.buffer);
+      if(pendingMusic){pendingMusic=false;startMusic();}
+    }catch(e){console.warn('音频解码失败',e);}
+  })();
+  return decodePromise;
 }
 function startMusic(){
-  if(!audioCtx||!audioBuffer)return;
+  if(!audioCtx||!audioBuffer){pendingMusic=true;return;}
   stopMusic();
   audioSource=audioCtx.createBufferSource();
   audioSource.buffer=audioBuffer;audioSource.loop=true;
@@ -828,9 +846,15 @@ function startMusic(){
   musicGain.connect(audioCtx.destination);
   if(mediaDest)musicGain.connect(mediaDest);
   audioSource.start();
+  updateMusicBtn();
+}
+function updateMusicBtn(){
+  const b=document.getElementById('btnMusic');
+  if(b)b.textContent=audioSource?'🔇 关音乐':'🎵 音乐';
 }
 function stopMusic(){
   if(audioSource){try{audioSource.stop();}catch(e){}audioSource=null;}
+  updateMusicBtn();
 }
 
 /* ============================================================
@@ -886,10 +910,8 @@ async function recordVideo(){
     return;
   }
   btnVideo.disabled=true;btnVideo.textContent='⏺ 准备中…';
-  try{
-    await ensureAudio();
-    if(audioCtx&&audioCtx.state==='suspended')await audioCtx.resume();
-  }catch(e){console.warn('音频解码失败',e);}
+  primeAudio();
+  try{await ensureAudio();}catch(e){console.warn('音频解码失败',e);}
 
   if(audioCtx&&audioBuffer){
     mediaDest=audioCtx.createMediaStreamDestination();
@@ -995,8 +1017,9 @@ $('btnClearAv').addEventListener('click',()=>{
 const btnVideo=$('btnVideo');
 async function handleOpen(){
   if(stage==='envelope'){
-    try{await ensureAudio();if(audioCtx&&audioCtx.state==='suspended')await audioCtx.resume();}catch(e){}
-    startMusic();
+    primeAudio();                       /* 同步解锁，必须在点击手势内 */
+    ensureAudio().then(()=>startMusic());/* 解码完自动起播 */
+    startMusic();                        /* 已解码过则立刻播放 */
     startOpening();
   } else if(stage==='card'){
     currentPage=1;playAnim();
@@ -1008,6 +1031,14 @@ canvas.addEventListener('click',handleOpen);
 $('btnImgCover').addEventListener('click',()=>exportPage('cover','圣诞贺卡-封面.png'));
 $('btnImgInside').addEventListener('click',()=>exportPage('inside','圣诞贺卡-内页.png'));
 btnVideo.addEventListener('click',recordVideo);
+$('btnMusic').addEventListener('click',()=>{
+  primeAudio();
+  if(audioSource){stopMusic();toast('音乐已暂停');return;}
+  ensureAudio().then(()=>{
+    if(audioBuffer){startMusic();toast('音乐播放中 🎵');}
+    else{toast('这段音乐暂时解码不了');}
+  });
+});
 
 let toastTimer=null;
 function toast(msg){
